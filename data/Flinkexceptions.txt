@@ -1,0 +1,207 @@
+Most of the Apache Flink exceptions we face in deployment scenario’s can get resolved with help of Flink provided configurations.
+
+https://nightlies.apache.org/flink/flink-docs-release-1.16/docs/deployment/config
+
+Let’s discuss few of the craziest exceptions that at least I have seen in one of our recent flink(1.16) deployment and how we get rid (lowered the occurrence) of them;
+
+Kafka Failed Committed offset
+Exceeded checkpoint tolerable failure threshold
+Exception while creating StreamOperatorStateContext: Caused by: org.rocksdb.RocksDBException: Bad table magic number
+Failure to finalize checkpoint: Caused by: java.io.IOException: Target file file:/opt/flink/pm/checkpoint/000000006e6b13320000000000000000/chk-1/_metadata already exists.
+Kafka Failed Committed offset
+Exception:
+
+2023-04-10 13:48:39,366 INFO  org.apache.kafka.clients.NetworkClient                       [] - [Consumer
+clientId=event-executor-client-1, groupId=event-executor-grp] Node 1 disconnected.
+2023-04-10 13:48:39,366 INFO  org.apache.kafka.clients.NetworkClient                       [] - [Consumer
+clientId=event-executor-client-1, groupId=event-executor-grp] Cancelled in-flight FETCH request with
+correlation id 8759 due to node 1 being disconnected (elapsed time since creation: 0ms, elapsed time since
+send: 0ms, request timeout: 30000ms)
+2023-04-10 13:48:39,366 INFO  org.apache.kafka.clients.FetchSessionHandler                 [] - [Consumer
+clientId=event-executor-client-1, groupId=event-executor-grp] Error sending fetch request (sessionId=INVALID,
+epoch=INITIAL) to node 1:
+org.apache.kafka.common.errors.DisconnectException: null
+2023-04-10 13:48:40,317 INFO  org.apache.kafka.clients.NetworkClient
+clientId=producer-122] Node 19 disconnected.
+2023-04-10 13:51:20,059 INFO  org.apache.kafka.clients.NetworkClient
+clientId=event-executor-client-1, groupId=event-executor-grp] Node 16 disconnected.
+[] - [Producer
+[] - [Consumer
+2023-04-10 13:51:20,060 INFO  org.apache.kafka.clients.NetworkClient
+clientId=event-executor-client-1, groupId=event-executor-grp] Cancelled in-flight FETCH request with
+correlation id 10312 due to node 16 being disconnected (elapsed time since creation: 0ms, elapsed time since
+send: 0ms, request timeout: 30000ms)
+2023-04-10 13:51:20,060 INFO  org.apache.kafka.clients.FetchSessionHandler                 [] - [Consumer
+clientId=event-executor-client-1, groupId=event-executor-grp] Error sending fetch request (sessionId=INVALID,
+epoch=INITIAL) to node 16:
+org.apache.kafka.common.errors.DisconnectException: null
+2023-04-10 13:51:48,469 WARN  org.apache.flink.connector.kafka.source.reader.KafkaSourceReader [] - Failed to
+commit consumer offsets for checkpoint 4
+org.apache.kafka.clients.consumer.RetriableCommitFailedException: Offset commit failed with a retriable
+exception. You should retry committing the latest consumed offsets.
+Caused by: org.apache.kafka.common.errors.CoordinatorNotAvailableException: The coordinator is not available.
+2023-04-10 13:51:48,829 WARN  org.apache.flink.connector.kafka.source.reader.KafkaSourceReader [] - Failed to
+commit consumer offsets for checkpoint 4
+org.apache.kafka.clients.consumer.RetriableCommitFailedException: Offset commit failed with a retriable
+exception. You should retry committing the latest consumed offsets.
+Caused by: org.apache.kafka.common.errors.CoordinatorNotAvailableException: The coordinator is not available.
+Reason: Consumer clients > Topic Partitions due to this the client session becomes invalid. This may also results in repartitioning hence clients connections are disconnected & reestablish again.
+You will keep on seeing the exceptions logged & may feel like it’s going into a loop kinda scenario.
+
+Solution: Ideally you should have the parallelism of your KafkaSource & KafkaSink equal to the number of partitions assigned to the topic listening or producing to.
+
+But considering real deployment & production env. changes, we added below properties in “KafkaSource” & “KafkaSink”.
+1. “reconnect.backoff.ms”: 1000
+2. “reconnect.backoff.max.ms”: 5000
+
+Adding this property helped us not seeing the loop kinda behavior.
+
+Exceeded checkpoint tolerable failure threshold
+Exception:
+
+org.apache.flink.util.FlinkRuntimeException: Exceeded checkpoint tolerable failure threshold.
+    at org.apache.flink.runtime.checkpoint.CheckpointFailureManager.checkFailureAgainstCounter
+(CheckpointFailureManager.java:206)
+    at org.apache.flink.runtime.checkpoint.CheckpointFailureManager.handleJobLevelCheckpointException
+(CheckpointFailureManager.java:169)
+    at org.apache.flink.runtime.checkpoint.CheckpointFailureManager.handleCheckpointException
+(CheckpointFailureManager.java:122)
+    at org.apache.flink.runtime.checkpoint.CheckpointCoordinator.abortPendingCheckpoint(CheckpointCoordinator.
+java:2104)
+    at org.apache.flink.runtime.checkpoint.CheckpointCoordinator.abortPendingCheckpoint(CheckpointCoordinator.
+java:2083)
+    at org.apache.flink.runtime.checkpoint.CheckpointCoordinator.finalizeCheckpoint(CheckpointCoordinator.java:
+1375)
+    at org.apache.flink.runtime.checkpoint.CheckpointCoordinator.completePendingCheckpoint
+(CheckpointCoordinator.java:1265)
+    at org.apache.flink.runtime.checkpoint.CheckpointCoordinator.receiveAcknowledgeMessage
+(CheckpointCoordinator.java:1157)
+    at org.apache.flink.runtime.scheduler.ExecutionGraphHandler.lambda$acknowledgeCheckpoint$1
+(ExecutionGraphHandler.java:89)
+    at org.apache.flink.runtime.scheduler.ExecutionGraphHandler.lambda$processCheckpointCoordinatorMessage$3
+(ExecutionGraphHandler.java:119)
+    at java.base/java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1128)
+    at java.base/java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:628)
+    at java.base/java.lang.Thread.run(Thread.java:834)
+Reason: It happens sometime that while taking snapshot/checkpoint at set interval time, it may not be able to complete within time or flink gets into some issue while finalising the checkpoint.
+
+Solution: We need to take care of few properties here, like checkpoint timeout, interval between 2 checkpoints, minimum pause between 2 checkpoints and finally tolerance limit of checkpoint failure.
+
+By default tolerance is set to 0. This means is checkpoint fails, with tolerance set to 0, above exception will occur.
+
+In our case tolerance setting to 3 helped. Rest timeout properties are as per your usecase and requirement.
+
+Properties to set in flink-conf.yaml
+execution.checkpointing.interval: 240s
+execution.checkpointing.min-pause: 60s
+
+Property we have set via code;
+Configuration config = new Configuration();
+config.set(ExecutionCheckpointingOptions.TOLERABLE_FAILURE_NUMBER,3);
+
+final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment(config);
+
+Exception while creating StreamOperatorStateContext:
+Caused by: org.rocksdb.RocksDBException: Bad table magic number
+
+Exception:
+
+
+2023-06-14 23:42:46
+java.lang.Exception: Exception while creating StreamOperatorStateContext.
+    at org.apache.flink.streaming.api.operators.StreamTaskStateInitializerImpl.streamOperatorStateContext(StreamTaskStateInitializerImpl.java:256)
+    at org.apache.flink.streaming.api.operators.AbstractStreamOperator.initializeState(AbstractStreamOperator.java:265)
+    at org.apache.flink.streaming.runtime.tasks.RegularOperatorChain.initializeStateAndOpenOperators(RegularOperatorChain.java:106)
+    at org.apache.flink.streaming.runtime.tasks.StreamTask.restoreGates(StreamTask.java:726)
+    at org.apache.flink.streaming.runtime.tasks.StreamTaskActionExecutor$1.call(StreamTaskActionExecutor.java:55)
+    at org.apache.flink.streaming.runtime.tasks.StreamTask.restoreInternal(StreamTask.java:702)
+    at org.apache.flink.streaming.runtime.tasks.StreamTask.restore(StreamTask.java:669)
+    at org.apache.flink.runtime.taskmanager.Task.runWithSystemExitMonitoring(Task.java:935)
+    at org.apache.flink.runtime.taskmanager.Task.restoreAndInvoke(Task.java:904)
+    at org.apache.flink.runtime.taskmanager.Task.doRun(Task.java:728)
+    at org.apache.flink.runtime.taskmanager.Task.run(Task.java:550)
+    at java.base/java.lang.Thread.run(Thread.java:834)
+Caused by: org.apache.flink.util.FlinkException: Could not restore keyed state backend for WindowOperator_e86e186b46037831968ebb9b688675bc_(1/2) from any of the 1 provided restore options.
+    at org.apache.flink.streaming.api.operators.BackendRestorerProcedure.createAndRestore(BackendRestorerProcedure.java:160)
+    at org.apache.flink.streaming.api.operators.StreamTaskStateInitializerImpl.keyedStatedBackend(StreamTaskStateInitializerImpl.java:353)
+    at org.apache.flink.streaming.api.operators.StreamTaskStateInitializerImpl.streamOperatorStateContext(StreamTaskStateInitializerImpl.java:165)
+    ... 11 more
+Caused by: org.apache.flink.runtime.state.BackendBuildingException: Caught unexpected exception.
+    at org.apache.flink.contrib.streaming.state.RocksDBKeyedStateBackendBuilder.build(RocksDBKeyedStateBackendBuilder.java:405)
+    at org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend.createKeyedStateBackend(EmbeddedRocksDBStateBackend.java:503)
+    at org.apache.flink.contrib.streaming.state.EmbeddedRocksDBStateBackend.createKeyedStateBackend(EmbeddedRocksDBStateBackend.java:98)
+    at org.apache.flink.streaming.api.operators.StreamTaskStateInitializerImpl.lambda$keyedStatedBackend$1(StreamTaskStateInitializerImpl.java:336)
+    at org.apache.flink.streaming.api.operators.BackendRestorerProcedure.attemptCreateAndRestore(BackendRestorerProcedure.java:168)
+    at org.apache.flink.streaming.api.operators.BackendRestorerProcedure.createAndRestore(BackendRestorerProcedure.java:135)
+    ... 13 more
+Caused by: java.io.IOException: Error while opening RocksDB instance.
+    at org.apache.flink.contrib.streaming.state.RocksDBOperationUtils.openDB(RocksDBOperationUtils.java:92)
+    at org.apache.flink.contrib.streaming.state.restore.RocksDBHandle.loadDb(RocksDBHandle.java:134)
+    at org.apache.flink.contrib.streaming.state.restore.RocksDBHandle.openDB(RocksDBHandle.java:124)
+    at org.apache.flink.contrib.streaming.state.restore.RocksDBIncrementalRestoreOperation.restoreFromLocalState(RocksDBIncrementalRestoreOperation.java:243)
+    at org.apache.flink.contrib.streaming.state.restore.RocksDBIncrementalRestoreOperation.restoreFromRemoteState(RocksDBIncrementalRestoreOperation.java:222)
+    at org.apache.flink.contrib.streaming.state.restore.RocksDBIncrementalRestoreOperation.restoreWithoutRescaling(RocksDBIncrementalRestoreOperation.java:189)
+    at org.apache.flink.contrib.streaming.state.restore.RocksDBIncrementalRestoreOperation.restore(RocksDBIncrementalRestoreOperation.java:169)
+    at org.apache.flink.contrib.streaming.state.RocksDBKeyedStateBackendBuilder.build(RocksDBKeyedStateBackendBuilder.java:325)
+    ... 18 more
+Caused by: org.rocksdb.RocksDBException: Bad table magic number: expected 9863518390377041911, found 17223112372431451250 in /tmp/tm_10.9.2.0:6122-c46d5f/tmp/job_000000006e6b13320000000000000000_op_WindowOperator_e86e186b46037831968ebb9b688675bc__1_2__uuid_78923e7c-9777-40d9-a5c5-fd7f0d2ee983/db/000210.sst
+    at org.rocksdb.RocksDB.open(Native Method)
+    at org.rocksdb.RocksDB.open(RocksDB.java:306)
+    at org.apache.flink.contrib.streaming.state.RocksDBOperationUtils.openDB(RocksDBOperationUtils.java:80)
+    ... 25 more
+This exception is the craziest & causes POD to get restarted. Handling this one is the trickiest as well.
+
+Reason: To. be honest, quite unknown. But what helped us to not see this again is bit of understanding the state recovery & snapshot process by going through below article;
+
+https://nightlies.apache.org/flink/flink-docs-release-1.16/docs/ops/state/large_state_tuning/#task-local-recovery
+
+Solution: We added support for local task recovery by adding below property in flink-conf.yaml;
+
+state.backend.local-recovery: true
+
+Note: Task local recovery is only supported for aligned checkpoints as of now (latest 1.17 version)
+
+Failure to finalize checkpoint:
+Caused by: java.io.IOException: Target file file:/opt/flink/pm/checkpoint/000000006e6b13320000000000000000/chk-1/_metadata already exists
+
+Exception:
+
+WARN  org.apache.flink.runtime.checkpoint.CheckpointFailureManager [] - Failed to
+trigger or complete checkpoint 1 for job 000000006e6b13320000000000000000. (0 consecutive failed attempts so
+far)
+org.apache.flink.runtime.checkpoint.CheckpointException: Failure to finalize checkpoint.
+        at org.apache.flink.runtime.checkpoint.CheckpointCoordinator.finalizeCheckpoint(CheckpointCoordinator.
+java:1375) ~[event_executor-1.0-SNAPSHOT.jar:?]
+        at org.apache.flink.runtime.checkpoint.CheckpointCoordinator.completePendingCheckpoint
+(CheckpointCoordinator.java:1265) ~[event_executor-1.0-SNAPSHOT.jar:?]
+        at org.apache.flink.runtime.checkpoint.CheckpointCoordinator.receiveAcknowledgeMessage
+(CheckpointCoordinator.java:1157) ~[event_executor-1.0-SNAPSHOT.jar:?]
+        at org.apache.flink.runtime.scheduler.ExecutionGraphHandler.lambda$acknowledgeCheckpoint$1
+(ExecutionGraphHandler.java:89) ~[event_executor-1.0-SNAPSHOT.jar:?]
+        at org.apache.flink.runtime.scheduler.ExecutionGraphHandler.lambda$processCheckpointCoordinatorMessage$3
+(ExecutionGraphHandler.java:119) ~[event_executor-1.0-SNAPSHOT.jar:?]
+        at java.util.concurrent.ThreadPoolExecutor.runWorker(ThreadPoolExecutor.java:1128) [?:?]
+        at java.util.concurrent.ThreadPoolExecutor$Worker.run(ThreadPoolExecutor.java:628) [?:?]
+        at java.lang.Thread.run(Thread.java:834) [?:?]
+Caused by: java.io.IOException: Target file file:/opt/flink/pm/checkpoint/000000006e6b13320000000000000000/chk-1
+/_metadata already exists.
+        at org.apache.flink.runtime.state.filesystem.FsCheckpointMetadataOutputStream.getOutputStreamWrapper
+(FsCheckpointMetadataOutputStream.java:168) ~[event_executor-1.0-SNAPSHOT.jar:?]
+        at org.apache.flink.runtime.state.filesystem.FsCheckpointMetadataOutputStream.<init>
+(FsCheckpointMetadataOutputStream.java:64) ~[event_executor-1.0-SNAPSHOT.jar:?]
+Reason: This exception has got some history man. Basically we are using NFS as distributed store for rocksdb i.e. our state backend in flink cluster.
+And we have couple of deployments done, where in some we are using same NFS mount.
+So what happens is when snapshot is done, it saves it nfs mount path & keeps adding the snapshot one after other as our checkpoint retain policy was set to 10.
+And what we do is whenever we redeploy or pod gets restarted because of any reason. We have enabled snapshot to be applied on start of flink job.
+Problem starts from here!
+Now what happens is checkpoint metadata is saved with a tag lets say ‘1’, subsequent will have tag ‘2’ and so on. This number keeps on incrementing.
+So here if by any chance any other deployment using same NFS is reinstalled or gets restarted will resume from last saved checkpoint & will now start the increment counter from the last saved one. Say it was ‘5’. So next checkpoint will be saved with ‘6’. Now the other deployment which is still running, was at ‘5’ and this time whoever first saves the checkpoint, the other one can’t save its snapshot as metadata folder with ‘6’ is already created.
+
+This is a bug in my view in Flink, but anyhow we have to overcome with this.
+Solution:
+
+Use separate NFS mounts for each deployment of your flink job.
+Revisit checkpoint retain policy, we changed it from ‘10’ to ‘1’.
+state.checkpoints.num-retained: 1
+
+Hope this helps! :)

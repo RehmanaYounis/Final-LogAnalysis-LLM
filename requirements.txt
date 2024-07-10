@@ -1,0 +1,9 @@
+python-dotenv
+streamlit
+langchain-openai
+pydantic
+pandas
+google-generativeai
+ipython
+openai==1.20.0
+trulens_eval
