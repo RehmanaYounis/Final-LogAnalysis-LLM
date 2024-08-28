@@ -73,7 +73,7 @@ st.markdown(
 )
 
 # Display the banner image
-st.image('background.jpg', width=500)  # Adjust the width as necessary
+#st.image('background.jpg', width=500)  # Adjust the width as necessary
 
 # Main title of the application with emojis and paragraph
 st.markdown("<h1 class='title'>💡 Log AI Analyzer 💡</h1>", unsafe_allow_html=True)
